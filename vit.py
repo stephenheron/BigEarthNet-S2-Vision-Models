@@ -2,18 +2,23 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+
 class ViT(nn.Module):
     def __init__(self, img_width, img_channels, patch_size, d_model, num_heads, num_layers, num_classes, ff_dim):
         super().__init__()
         self.patch_size = patch_size
+
         # Patch embedding
         self.patch_embedding = nn.Linear(img_channels * patch_size * patch_size, d_model)
+
         # CLS token
         self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
+
         # Position embedding
-        self.position_embedding = nn.Parameter(
-            torch.rand(1, (img_width // patch_size) * (img_width // patch_size) + 1, d_model)
-        )
+        #self.position_embedding = nn.Parameter(
+        #    torch.rand(1, (img_width // patch_size) * (img_width // patch_size) + 1, d_model)
+        #)
+
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
             d_model, nhead=num_heads, dim_feedforward=ff_dim, batch_first=True
@@ -37,7 +42,7 @@ class ViT(nn.Module):
         x = torch.cat((cls_tokens, x), dim=1)
         
         # Add position embedding
-        x = x + self.position_embedding
+        #x = x + self.position_embedding
         
         # Transform
         x = self.transformer_encoder(x)

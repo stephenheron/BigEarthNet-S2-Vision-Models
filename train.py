@@ -6,10 +6,17 @@ import torch.nn.functional as F
 import torch
 from dataset import BigEarthNetDataSet
 from vit import ViT
+from torch.amp import autocast, GradScaler
     
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 print(f"{device=}")
 
+def count_parameters(model):
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(f'{name}: {param.numel():,} parameters')
+    total = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f'Total: {total}')
     
 def train_step(model, optimizer, image, label, criterion):
     optimizer.zero_grad()
@@ -20,21 +27,7 @@ def train_step(model, optimizer, image, label, criterion):
     optimizer.step()
     return loss.item()
 
-def evaluate_multi_label(model, test_loader, device, writer=None, epoch=None, threshold=0.5):
-    """
-    Evaluate a multi-label classification model.
-    
-    Args:
-        model: The PyTorch model to evaluate
-        test_loader: DataLoader containing test data
-        device: Device to run evaluation on
-        writer: Optional TensorBoard writer
-        epoch: Optional epoch number for logging
-        threshold: Threshold for binary prediction (default: 0.5)
-    
-    Returns:
-        dict: Dictionary containing evaluation metrics
-    """
+def evaluate_multi_label(model, loader, type, device, writer=None, epoch=None, threshold=0.5):
     model.eval()
     total_samples = 0
     exact_matches = 0
@@ -43,7 +36,7 @@ def evaluate_multi_label(model, test_loader, device, writer=None, epoch=None, th
     total_false_negatives = 0
 
     with torch.no_grad():
-        for img, labels in test_loader:
+        for img, labels in loader:
             img = img.to(device)
             labels = labels.to(device)
             
@@ -77,7 +70,7 @@ def evaluate_multi_label(model, test_loader, device, writer=None, epoch=None, th
     # Log metrics to TensorBoard if writer is provided
     if writer is not None and epoch is not None:
         for metric_name, metric_value in metrics.items():
-            writer.add_scalar(f"test/{metric_name}", metric_value, epoch)
+            writer.add_scalar(f"{type}/{metric_name}", metric_value, epoch)
 
     return metrics
 
@@ -100,29 +93,29 @@ def main():
         raise FileNotFoundError(f"'{filename}' not found in '{directory_path}'")
 
     #possible splits: ['test' 'validation' 'train']
-    train_dataset = BigEarthNetDataSet('train', directory_path, file_path)
-    test_dataset = BigEarthNetDataSet('test', directory_path, file_path)
-    validation_dataset = BigEarthNetDataSet('validation', directory_path, file_path)
+    train_dataset = BigEarthNetDataSet('train')
+    test_dataset = BigEarthNetDataSet('test')
+    validation_dataset = BigEarthNetDataSet('validation')
 
     batch_size = 256
     lr = 3e-4
-    num_epochs = 15
+    num_epochs = 32
 
     img_width = 120
     img_channels = 3
     num_classes = 19
-    patch_size = 12
-    embedding_dim = 128
-    ff_dim = 512
+    patch_size = 8
+    embedding_dim = 512
+    ff_dim = 1024
     num_heads = 8 
-    num_layers = 6
+    num_layers = 6 
     weight_decay = 1e-4
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=16,
+        num_workers=4,
         pin_memory=True
     )
 
@@ -130,7 +123,15 @@ def main():
         test_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=16,
+        num_workers=4,
+        pin_memory=True
+    )
+    
+    validation_loader = torch.utils.data.DataLoader(
+        validation_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
         pin_memory=True
     )
 
@@ -148,8 +149,11 @@ def main():
         ff_dim=ff_dim,
     ).to(device)
 
+    count_parameters(model)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     criterion = nn.BCEWithLogitsLoss()
+    scaler = GradScaler()
 
     writer = SummaryWriter(f"runs/vit-big_earth_net_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}")
 
@@ -165,13 +169,16 @@ def main():
             label = label.to(device)
             
             optimizer.zero_grad()
-            outputs = model(img)  # Changed from 'image' to 'img' to match the loop variable
-            label = label.float()
-            
-            # Calculate loss
-            loss = criterion(outputs, label)
-            loss.backward()
-            optimizer.step()
+
+            with autocast(device_type='cuda', dtype=torch.float16):
+                outputs = model(img) 
+                label = label.float()
+                loss = criterion(outputs, label)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
             losses.append(loss.item())
             
             # Calculate accuracy
@@ -196,13 +203,24 @@ def main():
         model.eval()
         metrics = evaluate_multi_label(
             model=model,
-            test_loader=test_loader,
+            loader=validation_loader,
+            type="validation",
             device=device,
             writer=writer,
             epoch=epoch
         )
 
         print(f"{epoch=}")
+
+    model.eval()
+    metrics = evaluate_multi_label(
+        model=model,
+        loader=test_loader,
+        type="test",
+        device=device,
+        writer=writer,
+        epoch=epoch
+    )
 
 if __name__ == "__main__":
     main()
