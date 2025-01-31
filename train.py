@@ -7,9 +7,59 @@ import torch
 from dataset import BigEarthNetDataSet
 from vit import ViT
 from torch.amp import autocast, GradScaler
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from early_stopping_pytorch import EarlyStopping
     
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 print(f"{device=}")
+
+def find_optimal_thresholds(model, loader, device):
+    model.eval()
+    # Initialize lists to store all predictions and labels
+    all_predictions = []
+    all_labels = []
+    
+    with torch.no_grad():
+        for img, labels in loader:
+            img = img.to(device)
+            labels = labels.to(device)
+            outputs = model(img)
+            predictions = torch.sigmoid(outputs)
+            all_predictions.append(predictions)
+            all_labels.append(labels)
+    
+    # Concatenate all batches
+    all_predictions = torch.cat(all_predictions, dim=0)
+    all_labels = torch.cat(all_labels, dim=0)
+    
+    num_labels = all_predictions.shape[1]
+    optimal_thresholds = []
+    
+    # Find optimal threshold for each label
+    for label_idx in range(num_labels):
+        best_f1 = 0
+        best_threshold = 0.5
+        
+        for threshold in torch.linspace(0.1, 0.9, 100):
+            pred = (all_predictions[:, label_idx] > threshold).float()
+            true = all_labels[:, label_idx]
+            
+            # Calculate F1 score components
+            true_positives = (pred * true).sum()
+            false_positives = (pred * (1 - true)).sum()
+            false_negatives = ((1 - pred) * true).sum()
+            
+            precision = true_positives / (true_positives + false_positives + 1e-10)
+            recall = true_positives / (true_positives + false_negatives + 1e-10)
+            f1 = 2 * (precision * recall) / (precision + recall + 1e-10)
+            
+            if f1 > best_f1:
+                best_f1 = f1
+                best_threshold = threshold
+                
+        optimal_thresholds.append(best_threshold)
+    
+    return torch.tensor(optimal_thresholds).to(device)
 
 def count_parameters(model):
     for name, param in model.named_parameters():
@@ -18,16 +68,10 @@ def count_parameters(model):
     total = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'Total: {total}')
     
-def train_step(model, optimizer, image, label, criterion):
-    optimizer.zero_grad()
-    outputs = model(image)
-    label = label.float()
-    loss = criterion(outputs, label)  
-    loss.backward()
-    optimizer.step()
-    return loss.item()
-
-def evaluate_multi_label(model, loader, type, device, writer=None, epoch=None, threshold=0.5):
+def evaluate_multi_label(model, loader, type, device, writer=None, epoch=None, thresholds=None):
+    if thresholds is None:
+        thresholds = torch.ones(model.num_classes).to(device) * 0.5
+        
     model.eval()
     total_samples = 0
     exact_matches = 0
@@ -40,14 +84,12 @@ def evaluate_multi_label(model, loader, type, device, writer=None, epoch=None, t
             img = img.to(device)
             labels = labels.to(device)
             
-            # Get model predictions
             outputs = model(img)
-            predictions = (torch.sigmoid(outputs) > threshold).float()
+            # Use per-label thresholds
+            predictions = (torch.sigmoid(outputs) > thresholds[None, :]).float()
             
-            # Calculate exact matches (all labels correct)
             exact_matches += (predictions == labels).all(dim=1).sum().item()
             
-            # Calculate true positives, false positives, and false negatives
             true_positives = (predictions * labels).sum(dim=1)
             false_positives = (predictions * (1 - labels)).sum(dim=1)
             false_negatives = ((1 - predictions) * labels).sum(dim=1)
@@ -58,16 +100,12 @@ def evaluate_multi_label(model, loader, type, device, writer=None, epoch=None, t
             
             total_samples += img.size(0)
 
-    # Calculate metrics
     metrics = {}
     metrics['exact_match_ratio'] = exact_matches / total_samples
-    
-    # Calculate micro-F1 score
     metrics['precision'] = total_true_positives / (total_true_positives + total_false_positives + 1e-10)
     metrics['recall'] = total_true_positives / (total_true_positives + total_false_negatives + 1e-10)
     metrics['micro_f1'] = 2 * (metrics['precision'] * metrics['recall']) / (metrics['precision'] + metrics['recall'] + 1e-10)
 
-    # Log metrics to TensorBoard if writer is provided
     if writer is not None and epoch is not None:
         for metric_name, metric_value in metrics.items():
             writer.add_scalar(f"{type}/{metric_name}", metric_value, epoch)
@@ -98,7 +136,7 @@ def main():
     validation_dataset = BigEarthNetDataSet('validation')
 
     batch_size = 256
-    lr = 3e-4
+    lr = 5e-4
     num_epochs = 32
 
     img_width = 120
@@ -109,7 +147,7 @@ def main():
     ff_dim = 1024
     num_heads = 8 
     num_layers = 6 
-    weight_decay = 1e-4
+    weight_decay = 1e-3
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
@@ -151,13 +189,20 @@ def main():
 
     count_parameters(model)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2, verbose=True, min_lr=1e-6)
     criterion = nn.BCEWithLogitsLoss()
     scaler = GradScaler()
 
+    best_val_f1 = 0
+    optimal_thresholds = torch.ones(num_classes).to(device) * 0.5
+
     writer = SummaryWriter(f"runs/vit-big_earth_net_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}")
+    early_stopping = EarlyStopping(patience=4, verbose=True)
 
     for epoch in range(num_epochs):
+        print(f"Starting epoch: {epoch}")
+
         losses = []
         # Initialize metrics for each epoch
         total_predictions = 0
@@ -180,37 +225,28 @@ def main():
             scaler.update()
 
             losses.append(loss.item())
-            
-            # Calculate accuracy
-            # Apply sigmoid to get predictions between 0 and 1
-            predictions = torch.sigmoid(outputs)
-            # Convert to binary predictions (0 or 1) using threshold of 0.5
-            predicted_labels = (predictions > 0.5).float()
-            
-            # Calculate correct predictions
-            # For multi-label, a prediction is "correct" if all labels match
-            correct_predictions += (predicted_labels == label).all(dim=1).sum().item()
-            total_predictions += label.size(0)
-        
-        # Calculate epoch metrics
-        epoch_loss = sum(losses) / len(losses)
-        epoch_accuracy = correct_predictions / total_predictions
-        
-        # Log metrics
-        writer.add_scalar("train_loss", epoch_loss, epoch)
-        writer.add_scalar("train_accuracy", epoch_accuracy, epoch)
+            epoch_loss = sum(losses) / len(losses)
+            writer.add_scalar("train_loss", epoch_loss, epoch)
 
         model.eval()
+        optimal_thresholds = find_optimal_thresholds(model, validation_loader, device)
+        print("Optimal thresholds:", optimal_thresholds)
+
         metrics = evaluate_multi_label(
             model=model,
             loader=validation_loader,
             type="validation",
             device=device,
             writer=writer,
-            epoch=epoch
+            epoch=epoch,
+            thresholds=optimal_thresholds
         )
 
-        print(f"{epoch=}")
+        scheduler.step(metrics['micro_f1'])
+    
+        if metrics['micro_f1'] > best_val_f1:
+            best_val_f1 = metrics['micro_f1']
+            best_thresholds = optimal_thresholds.clone()
 
     model.eval()
     metrics = evaluate_multi_label(
@@ -219,7 +255,8 @@ def main():
         type="test",
         device=device,
         writer=writer,
-        epoch=epoch
+        epoch=epoch,
+        thresholds=optimal_thresholds
     )
 
 if __name__ == "__main__":
