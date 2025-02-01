@@ -67,24 +67,30 @@ def count_parameters(model):
             print(f'{name}: {param.numel():,} parameters')
     total = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'Total: {total}')
-    
+
 def evaluate_multi_label(model, loader, type, device, writer=None, epoch=None, thresholds=None):
     if thresholds is None:
         thresholds = torch.ones(model.num_classes).to(device) * 0.5
-        
+    
+    criterion = torch.nn.BCEWithLogitsLoss(reduction='sum')
     model.eval()
     total_samples = 0
+    total_loss = 0.0
     exact_matches = 0
     total_true_positives = 0
     total_false_positives = 0
     total_false_negatives = 0
-
+    
     with torch.no_grad():
         for img, labels in loader:
             img = img.to(device)
             labels = labels.to(device)
             
             outputs = model(img)
+            # Calculate loss
+            batch_loss = criterion(outputs, labels)
+            total_loss += batch_loss.item()
+            
             # Use per-label thresholds
             predictions = (torch.sigmoid(outputs) > thresholds[None, :]).float()
             
@@ -99,18 +105,22 @@ def evaluate_multi_label(model, loader, type, device, writer=None, epoch=None, t
             total_false_negatives += false_negatives.sum().item()
             
             total_samples += img.size(0)
-
+    
+    # Calculate average loss
+    avg_loss = total_loss / total_samples
+    
     metrics = {}
+    metrics['loss'] = avg_loss
     metrics['exact_match_ratio'] = exact_matches / total_samples
     metrics['precision'] = total_true_positives / (total_true_positives + total_false_positives + 1e-10)
     metrics['recall'] = total_true_positives / (total_true_positives + total_false_negatives + 1e-10)
     metrics['micro_f1'] = 2 * (metrics['precision'] * metrics['recall']) / (metrics['precision'] + metrics['recall'] + 1e-10)
-
+    
     if writer is not None and epoch is not None:
         for metric_name, metric_value in metrics.items():
             writer.add_scalar(f"{type}/{metric_name}", metric_value, epoch)
-
-    return metrics
+    
+    return metrics    
 
 def main():
     parser = argparse.ArgumentParser(description='Process a specific file in a directory')
@@ -198,7 +208,7 @@ def main():
     optimal_thresholds = torch.ones(num_classes).to(device) * 0.5
 
     writer = SummaryWriter(f"runs/vit-big_earth_net_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}")
-    early_stopping = EarlyStopping(patience=4, verbose=True)
+    early_stopping = EarlyStopping(patience=12, verbose=True)
 
     for epoch in range(num_epochs):
         print(f"Starting epoch: {epoch}")
@@ -242,11 +252,36 @@ def main():
             thresholds=optimal_thresholds
         )
 
+        early_stopping(-metrics['micro_f1'], model)
+        if early_stopping.early_stop:
+            print("Early stopping triggered")
+            break
+
         scheduler.step(metrics['micro_f1'])
     
         if metrics['micro_f1'] > best_val_f1:
             best_val_f1 = metrics['micro_f1']
             best_thresholds = optimal_thresholds.clone()
+
+            # Save the model and thresholds
+            checkpoint = {
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'best_val_f1': best_val_f1,
+                'epoch': epoch,
+                'thresholds': best_thresholds,
+                'hyperparameters': {
+                    'img_width': img_width,
+                    'img_channels': img_channels,
+                    'patch_size': patch_size,
+                    'embedding_dim': embedding_dim,
+                    'ff_dim': ff_dim,
+                    'num_heads': num_heads,
+                    'num_layers': num_layers,
+                    'num_classes': num_classes
+                }
+            }
+            torch.save(checkpoint, f'model_checkpoint_f1_{best_val_f1:.3f}.pt')
 
     model.eval()
     metrics = evaluate_multi_label(
