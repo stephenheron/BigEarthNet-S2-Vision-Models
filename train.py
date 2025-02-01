@@ -126,6 +126,7 @@ def main():
     parser = argparse.ArgumentParser(description='Process a specific file in a directory')
     parser.add_argument('directory', help='Path to the BigEarthNet directory')
     parser.add_argument('filename', help='Name of the metadata parquet file to process')
+    parser.add_argument('--checkpoint', help='Path to checkpoint file to resume training from', default=None)
     
     args = parser.parse_args()
 
@@ -140,15 +141,15 @@ def main():
     if not os.path.isfile(file_path):
         raise FileNotFoundError(f"'{filename}' not found in '{directory_path}'")
 
-    #possible splits: ['test' 'validation' 'train']
     train_dataset = BigEarthNetDataSet('train')
     test_dataset = BigEarthNetDataSet('test')
     validation_dataset = BigEarthNetDataSet('validation')
 
     batch_size = 256
     lr = 5e-4
-    num_epochs = 32
+    num_epochs = 64
 
+    # Default hyperparameters
     img_width = 120
     img_channels = 3
     num_classes = 19
@@ -186,38 +187,78 @@ def main():
     from torch.utils.tensorboard import SummaryWriter
     from datetime import datetime
 
-    model = ViT(
-        img_width=img_width,
-        img_channels=img_channels,
-        patch_size=patch_size,
-        d_model=embedding_dim,
-        num_heads=num_heads,
-        num_layers=num_layers,
-        num_classes=num_classes,
-        ff_dim=ff_dim,
-    ).to(device)
+    start_epoch = 0
+    best_val_f1 = 0
+    optimal_thresholds = torch.ones(num_classes).to(device) * 0.5
+
+    # Load checkpoint if provided
+    if args.checkpoint and os.path.isfile(args.checkpoint):
+        print(f"Loading checkpoint from {args.checkpoint}")
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+        
+        # Update hyperparameters from checkpoint
+        hp = checkpoint['hyperparameters']
+        img_width = hp['img_width']
+        img_channels = hp['img_channels']
+        patch_size = hp['patch_size']
+        embedding_dim = hp['embedding_dim']
+        ff_dim = hp['ff_dim']
+        num_heads = hp['num_heads']
+        num_layers = hp['num_layers']
+        num_classes = hp['num_classes']
+        
+        # Create model with loaded hyperparameters
+        model = ViT(
+            img_width=img_width,
+            img_channels=img_channels,
+            patch_size=patch_size,
+            d_model=embedding_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            num_classes=num_classes,
+            ff_dim=ff_dim,
+        ).to(device)
+        
+        # Load model state
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Initialize optimizer after model parameters are loaded
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        # Load training state
+        start_epoch = checkpoint['epoch'] + 1
+        best_val_f1 = checkpoint['best_val_f1']
+        optimal_thresholds = checkpoint['thresholds']
+        
+        print(f"Resuming from epoch {start_epoch} with best F1 score: {best_val_f1:.4f}")
+    else:
+        # Create new model if no checkpoint
+        model = ViT(
+            img_width=img_width,
+            img_channels=img_channels,
+            patch_size=patch_size,
+            d_model=embedding_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            num_classes=num_classes,
+            ff_dim=ff_dim,
+        ).to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     count_parameters(model)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2, verbose=True, min_lr=1e-6)
     criterion = nn.BCEWithLogitsLoss()
     scaler = GradScaler()
 
-    best_val_f1 = 0
-    optimal_thresholds = torch.ones(num_classes).to(device) * 0.5
-
     writer = SummaryWriter(f"runs/vit-big_earth_net_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}")
     early_stopping = EarlyStopping(patience=12, verbose=True)
 
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         print(f"Starting epoch: {epoch}")
 
         losses = []
-        # Initialize metrics for each epoch
-        total_predictions = 0
-        correct_predictions = 0
-        
         model.train()
         for img, label in train_loader:
             img = img.to(device)
