@@ -22,7 +22,7 @@ class BigEarthNetDataSet(torch.utils.data.Dataset):
         image_data = torch.from_numpy(image_data).float() / 255.0
         
         # Load pre-computed labels
-        label = torch.from_numpy(self.labels[idx])
+        label = torch.from_numpy(self.labels[idx]).float()
         
         return image_data, label
 

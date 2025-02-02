@@ -9,6 +9,7 @@ from vit import ViT
 from torch.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from early_stopping_pytorch import EarlyStopping
+from transformers import get_cosine_schedule_with_warmup
     
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 print(f"{device=}")
@@ -146,16 +147,16 @@ def main():
     validation_dataset = BigEarthNetDataSet('validation')
 
     batch_size = 256
-    lr = 5e-4
+    lr = 2e-3
     num_epochs = 64
 
     # Default hyperparameters
     img_width = 120
-    img_channels = 3
+    img_channels = 5
     num_classes = 19
     patch_size = 8
-    embedding_dim = 512
-    ff_dim = 1024
+    embedding_dim = 128
+    ff_dim = 512
     num_heads = 8 
     num_layers = 6 
     weight_decay = 1e-3
@@ -248,12 +249,20 @@ def main():
 
     count_parameters(model)
 
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2, verbose=True, min_lr=1e-6)
+    steps_per_epoch = len(train_loader)
+    num_training_steps = num_epochs * steps_per_epoch
+    num_warmup_steps = num_training_steps * 0.1  # 10% warmup
+
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps
+    )
     criterion = nn.BCEWithLogitsLoss()
     scaler = GradScaler()
 
     writer = SummaryWriter(f"runs/vit-big_earth_net_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}")
-    early_stopping = EarlyStopping(patience=12, verbose=True)
+    early_stopping = EarlyStopping(patience=6, verbose=True)
 
     for epoch in range(start_epoch, num_epochs):
         print(f"Starting epoch: {epoch}")
@@ -293,12 +302,12 @@ def main():
             thresholds=optimal_thresholds
         )
 
-        early_stopping(-metrics['micro_f1'], model)
+        early_stopping(metrics['loss'], model)
         if early_stopping.early_stop:
             print("Early stopping triggered")
             break
 
-        scheduler.step(metrics['micro_f1'])
+        scheduler.step()
     
         if metrics['micro_f1'] > best_val_f1:
             best_val_f1 = metrics['micro_f1']

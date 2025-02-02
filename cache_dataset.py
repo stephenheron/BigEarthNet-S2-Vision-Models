@@ -44,8 +44,8 @@ def preprocess_dataset(image_directory, metadata_file, cache_file, split):
     num_classes = len(one_hot_encode_land_use(first_sample_labels))
     
     # Pre-allocate arrays with reduced memory footprint
-    image_data = np.zeros((num_samples, 3, 120, 120), dtype=np.uint8)
-    labels = np.zeros((num_samples, num_classes), dtype=np.float32)  # keep labels as float32
+    image_data = np.zeros((num_samples, 5, 120, 120), dtype=np.uint8)
+    labels = np.zeros((num_samples, num_classes), dtype=np.uint8) 
     
     # Create progress bar
     pbar = tqdm(total=num_samples, desc="Processing images")
@@ -57,25 +57,49 @@ def preprocess_dataset(image_directory, metadata_file, cache_file, split):
         try:
             # Get file paths
             paths = {
-                'B02': glob.glob(os.path.join(dir_path, '*B02.tif'))[0],
-                'B03': glob.glob(os.path.join(dir_path, '*B03.tif'))[0],
-                'B04': glob.glob(os.path.join(dir_path, '*B04.tif'))[0]
+                'B02': glob.glob(os.path.join(dir_path, '*B02.tif'))[0],  # Blue
+                'B03': glob.glob(os.path.join(dir_path, '*B03.tif'))[0],  # Green
+                'B04': glob.glob(os.path.join(dir_path, '*B04.tif'))[0],  # Red
+                'B08': glob.glob(os.path.join(dir_path, '*B08.tif'))[0],  # NIR
+                'B11': glob.glob(os.path.join(dir_path, '*B11.tif'))[0]   # SWIR 1
             }
-            
+
             # Read and process bands
             bands = []
-            for band_path in [paths['B04'], paths['B03'], paths['B02']]:
+            for band_path in [paths['B04'], paths['B03'], paths['B02'], paths['B08']]:
                 with rasterio.open(band_path) as src:
                     band = src.read(1).astype(np.float32)
                     bands.append(band)
-            
-            rgb = np.stack(bands)
-            # Normalize to 0-1 and then scale to 0-255 for uint8
-            rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min())
-            rgb = (rgb * 255).astype(np.uint8)
+
+            # Handle SWIR band separately with upsampling
+            with rasterio.open(paths['B11']) as src:
+                # Get the target shape from one of the 10m bands
+                with rasterio.open(paths['B04']) as ref:
+                    target_shape = ref.read(1).shape
+                
+                # Resample SWIR to 10m
+                swir = src.read(
+                    1,
+                    out_shape=target_shape,
+                    resampling=rasterio.enums.Resampling.bilinear
+                ).astype(np.float32)
+                bands.append(swir)
+
+            # Stack all bands
+            all_bands = np.stack(bands)
+
+            normalized_bands = np.zeros_like(all_bands)
+            eps = 1e-8  # Small number to prevent division by zero
+            for i in range(all_bands.shape[0]):
+                band = all_bands[i]
+                band_min = band.min()  # Calculate min for this band
+                band_max = band.max()  # Calculate max for this band
+                normalized_bands[i] = (band - band_min) / (band_max - band_min + eps)
+
+            all_bands = (normalized_bands * 255).astype(np.uint8) 
             
             # Store processed data
-            image_data[idx] = rgb
+            image_data[idx] = all_bands
             labels[idx] = one_hot_encode_land_use(row['labels'])
             
         except Exception as e:
@@ -104,21 +128,6 @@ def preprocess_dataset(image_directory, metadata_file, cache_file, split):
             for key, value in record.items():
                 record_group.attrs[key] = value
     logger.info("Preprocessing complete!")
-
-class CachedBigEarthNetDataSet(torch.utils.data.Dataset):
-    def __init__(self, cache_file):
-        self.data = np.load(cache_file, mmap_mode='r')
-        self.images = self.data['images']
-        self.labels = self.data['labels']
-        
-    def __getitem__(self, idx):
-        # Convert uint8 back to float32 normalized 0-1
-        image = torch.from_numpy(self.images[idx].copy()).float() / 255.0
-        label = torch.from_numpy(self.labels[idx].copy())
-        return image, label
-    
-    def __len__(self):
-        return len(self.images)
 
 def main():
     parser = argparse.ArgumentParser(description='Preprocess BigEarthNet dataset and create cached files')
