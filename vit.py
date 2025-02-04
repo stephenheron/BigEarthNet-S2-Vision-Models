@@ -1,11 +1,13 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
+from training_framework import BaseModel
+from transformers import get_cosine_schedule_with_warmup
 
-
-class ViT(nn.Module):
+class ViT(BaseModel):
     def __init__(self, img_width, img_channels, patch_size, d_model, num_heads, num_layers, num_classes, ff_dim):
-        super().__init__()
+        super().__init__(num_classes)
+
         self.patch_size = patch_size
 
         # Patch embedding
@@ -13,11 +15,6 @@ class ViT(nn.Module):
 
         # CLS token
         self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
-
-        # Position embedding
-        #self.position_embedding = nn.Parameter(
-        #    torch.rand(1, (img_width // patch_size) * (img_width // patch_size) + 1, d_model)
-        #)
 
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
@@ -53,3 +50,14 @@ class ViT(nn.Module):
         # Final classification
         x = self.fc(x)
         return x
+    
+    def get_learning_rate_scheduler(self, optimizer, steps_per_epoch, num_epochs):
+        num_training_steps = num_epochs * steps_per_epoch
+        num_warmup_steps = num_training_steps * 0.05
+        
+        return get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps
+        )
+
