@@ -125,41 +125,28 @@ def evaluate_multi_label(model, loader, type, device, writer=None, epoch=None, t
 
 def main():
     parser = argparse.ArgumentParser(description='Process a specific file in a directory')
-    parser.add_argument('directory', help='Path to the BigEarthNet directory')
-    parser.add_argument('filename', help='Name of the metadata parquet file to process')
     parser.add_argument('--checkpoint', help='Path to checkpoint file to resume training from', default=None)
     
     args = parser.parse_args()
-
-    directory_path = args.directory
-    filename = args.filename
-    file_path = os.path.join(directory_path, filename)
-    
-    # Verify the directory exists
-    if not os.path.isdir(directory_path):
-        raise NotADirectoryError(f"'{directory_path}' is not a valid directory")
-
-    if not os.path.isfile(file_path):
-        raise FileNotFoundError(f"'{filename}' not found in '{directory_path}'")
 
     train_dataset = BigEarthNetDataSet('train')
     test_dataset = BigEarthNetDataSet('test')
     validation_dataset = BigEarthNetDataSet('validation')
 
     batch_size = 256
-    lr = 2e-3
-    num_epochs = 64
+    lr = 4e-3
+    num_epochs = 40 
 
     # Default hyperparameters
     img_width = 120
     img_channels = 5
     num_classes = 19
     patch_size = 8
-    embedding_dim = 128
-    ff_dim = 512
+    embedding_dim = 256
+    ff_dim = 1536
     num_heads = 8 
     num_layers = 6 
-    weight_decay = 1e-3
+    weight_decay = 2e-4
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
@@ -251,7 +238,7 @@ def main():
 
     steps_per_epoch = len(train_loader)
     num_training_steps = num_epochs * steps_per_epoch
-    num_warmup_steps = num_training_steps * 0.1  # 10% warmup
+    num_warmup_steps = num_training_steps * 0.05 
 
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
