@@ -6,6 +6,7 @@ from torch.utils.tensorboard import SummaryWriter
 from early_stopping_pytorch import EarlyStopping
 from datetime import datetime
 import os
+from tqdm import tqdm
 
 class BaseModel(nn.Module):
     """Base class for all models"""
@@ -20,7 +21,7 @@ class BaseModel(nn.Module):
             'total_parameters': total,
             'model_type': self.__class__.__name__
         }
-
+    
 class ModelTrainer:
     def __init__(
         self,
@@ -31,39 +32,67 @@ class ModelTrainer:
         device,
         learning_rate=1e-3,
         weight_decay=1e-4,
-        num_epochs=40,
-        patience=6
+        num_epochs=80,
+        patience=6,
+        checkpoint=None  # Add checkpoint parameter
     ):
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.test_loader = test_loader
         self.device = device
-        self.learning_rate = learning_rate
-        self.weight_decay = weight_decay
         self.num_epochs = num_epochs
         self.patience = patience
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
         
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay
-        )
+        # Initialize or restore from checkpoint
+        if checkpoint is not None:
+            self.start_epoch = checkpoint['epoch'] + 1
+            self.best_val_f1 = checkpoint['best_val_f1']
+            
+            # Restore optimizer state
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                lr=self.learning_rate,
+                weight_decay=self.weight_decay
+            )
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # Restore thresholds if they exist
+            self.optimal_thresholds = checkpoint.get('thresholds', 
+                torch.ones(self.model.num_classes).to(self.device) * 0.5)
+        else:
+            self.start_epoch = 0
+            self.best_val_f1 = 0
+            self.optimal_thresholds = torch.ones(self.model.num_classes).to(self.device) * 0.5
+            
+            # Create new optimizer
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                lr=self.learning_rate,
+                weight_decay=self.weight_decay
+            )
         
         self.criterion = nn.BCEWithLogitsLoss()
         self.scaler = GradScaler()
         
-        # Setup tensorboard
-        self.writer = SummaryWriter(
-            f"runs/{model.__class__.__name__}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}"
-        )
+        # Setup tensorboard with continued run if resuming
+        run_name = f"{model.__class__.__name__}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}"
+        if checkpoint is not None:
+            run_name += "_resumed"
+        self.writer = SummaryWriter(f"runs/{run_name}")
         
         # Setup early stopping
         self.early_stopping = EarlyStopping(patience=patience, verbose=True)
         
         # Setup learning rate scheduler
         steps_per_epoch = len(train_loader)
-        self.scheduler = model.get_learning_rate_scheduler(self.optimizer, steps_per_epoch, num_epochs)
+        self.scheduler = model.get_learning_rate_scheduler(
+            self.optimizer, 
+            steps_per_epoch, 
+            num_epochs - self.start_epoch  # Adjust for remaining epochs
+        )
 
     def find_optimal_thresholds(self):
         """Find optimal thresholds for multi-label classification"""
@@ -158,40 +187,45 @@ class ModelTrainer:
         if epoch is not None:
             for metric_name, metric_value in metrics.items():
                 self.writer.add_scalar(f"{phase}/{metric_name}", metric_value, epoch)
+
+            self.writer.flush()
         
         return metrics
 
-    def save_checkpoint(self, epoch, best_val_f1, thresholds):
+    def save_checkpoint(self, epoch, thresholds):
         """Save model checkpoint"""
         checkpoint = {
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'best_val_f1': best_val_f1,
+            'best_val_f1': self.best_val_f1,
             'epoch': epoch,
             'thresholds': thresholds,
             'model_parameters': self.model.get_parameters()
         }
-        torch.save(checkpoint, f'{self.model.__class__.__name__}_checkpoint_f1_{best_val_f1:.3f}.pt')
+        torch.save(checkpoint, f'{self.model.__class__.__name__}_checkpoint_f1_{self.best_val_f1:.3f}.pt')
 
     def train(self):
         """Main training loop"""
-        best_val_f1 = 0
         optimal_thresholds = torch.ones(self.model.num_classes).to(self.device) * 0.5
+
+        print(f"Starting training from epoch {self.start_epoch}/{self.num_epochs}")
+        remaining_epochs = self.num_epochs - self.start_epoch
+        print(f"Remaining epochs: {remaining_epochs}")
         
-        for epoch in range(self.num_epochs):
+        for epoch in range(self.start_epoch, self.num_epochs): 
             print(f"Starting epoch: {epoch}")
             
             # Training phase
             self.model.train()
             losses = []
             
-            for img, label in self.train_loader:
+            for img, label in tqdm(self.train_loader, desc=f"Epoch {epoch}"):
                 img = img.to(self.device)
                 label = label.to(self.device)
                 
                 self.optimizer.zero_grad()
                 
-                with autocast(device_type='cuda', dtype=torch.float16):
+                with autocast(device_type='cuda', dtype=torch.bfloat16):
                     outputs = self.model(img)
                     label = label.float()
                     loss = self.criterion(outputs, label)
@@ -218,14 +252,14 @@ class ModelTrainer:
             self.scheduler.step()
             
             # Save best model
-            if metrics['micro_f1'] > best_val_f1:
-                best_val_f1 = metrics['micro_f1']
-                self.save_checkpoint(epoch, best_val_f1, optimal_thresholds)
-        
-        # Final evaluation on test set
-        test_metrics = self.evaluate(self.test_loader, "test", None, optimal_thresholds)
+            if metrics['micro_f1'] > self.best_val_f1:
+                self.best_val_f1 = metrics['micro_f1']
+                self.save_checkpoint(epoch, optimal_thresholds)
+
+         # Final evaluation on test set
+        test_metrics = self.evaluate(self.test_loader, "test", None, self.optimal_thresholds)
         print("Final test metrics:", test_metrics)
-        return test_metrics
+        return test_metrics        
 
 def load_checkpoint(model, checkpoint_path, device):
     """Load model from checkpoint"""

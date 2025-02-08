@@ -3,6 +3,7 @@ import torch
 from dataset import BigEarthNetDataSet
 from training_framework import ModelTrainer, load_checkpoint
 from vit import ViT  
+from cnn import CNN  
 
 def main():
     parser = argparse.ArgumentParser(description='Train ViT or CNN models on BigEarthNet')
@@ -12,8 +13,6 @@ def main():
     
     args = parser.parse_args()
 
-    batch_size = 256
-
     # Set device
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
@@ -22,6 +21,11 @@ def main():
     train_dataset = BigEarthNetDataSet('train')
     test_dataset = BigEarthNetDataSet('test')
     validation_dataset = BigEarthNetDataSet('validation')
+    
+    if args.model == 'vit':
+        batch_size = 256
+    else:  # CNN
+        batch_size = 256
 
     # Create data loaders
     train_loader = torch.utils.data.DataLoader(
@@ -57,10 +61,9 @@ def main():
     learning_rate = None
     weight_decay = None
 
-
     # Create model based on architecture choice
     if args.model == 'vit':
-        num_epochs = 40
+        num_epochs = 80
         learning_rate = 4e-3
         weight_decay = 2e-4
 
@@ -75,17 +78,22 @@ def main():
             ff_dim=1536
         ).to(device)
     else:  # CNN
-        pass
-        #model = CNNModel(
-        #    img_channels=img_channels,
-        #    num_classes=num_classes
-        #).to(device)
+        num_epochs = 40
+        learning_rate = 4e-3
+        weight_decay = 2e-4
 
+        model = CNN(
+            img_channels=img_channels,
+            num_classes=num_classes
+        ).to(device)
+
+    checkpoint = None
     # Load checkpoint if provided
     if args.checkpoint:
         model, checkpoint = load_checkpoint(model, args.checkpoint, device)
         print(f"Loaded checkpoint from {args.checkpoint}")
         print(f"Previous best F1: {checkpoint['best_val_f1']:.4f}")
+        print(f"Resuming from epoch {checkpoint['epoch'] + 1}")
 
     # Print model parameters
     print("\nModel Parameters:")
@@ -102,7 +110,8 @@ def main():
         device=device,
         learning_rate=learning_rate,
         weight_decay=weight_decay,
-        num_epochs=num_epochs
+        num_epochs=num_epochs,
+        checkpoint=checkpoint 
     )
 
     # Train model

@@ -3,10 +3,11 @@ import time
 import argparse
 from dataset import BigEarthNetDataSet
 from vit import ViT
+from cnn import CNN  # Added CNN import
 from torch.utils.data import DataLoader
 import torch.multiprocessing as mp
 
-torch.set_num_threads(mp.cpu_count())  # Use all available CPU cores
+torch.set_num_threads(mp.cpu_count())
 torch.set_float32_matmul_precision('high')
 
 def evaluate_model(model, test_loader, thresholds, device):
@@ -20,9 +21,8 @@ def evaluate_model(model, test_loader, thresholds, device):
     total_time = 0
     total_batches = 0
     
-    # Get total number of batches for progress tracking
     total_steps = len(test_loader)
-    print_interval = max(total_steps // 20, 1)  # Print every 5% or at least once per batch
+    print_interval = max(total_steps // 20, 1)
     
     print("\nStarting evaluation...")
     print("Progress | Precision | Recall | F1 Score | Exact Match | Images/sec | MS/image")
@@ -54,7 +54,6 @@ def evaluate_model(model, test_loader, thresholds, device):
             
             total_samples += img.size(0)
             
-            # Print running metrics at intervals
             if (batch_idx + 1) % print_interval == 0 or (batch_idx + 1) == total_steps:
                 precision = total_true_positives / (total_true_positives + total_false_positives + 1e-10)
                 recall = total_true_positives / (total_true_positives + total_false_negatives + 1e-10)
@@ -67,7 +66,6 @@ def evaluate_model(model, test_loader, thresholds, device):
                 print(f"{progress:7.1f}% | {precision:.4f} | {recall:.4f} | {f1_score:.4f} | "
                       f"{exact_match_ratio:.4f} | {images_per_second:8.1f} | {ms_per_image:8.1f}")
     
-    # Calculate final metrics
     final_metrics = {
         'precision': precision,
         'recall': recall,
@@ -81,42 +79,53 @@ def evaluate_model(model, test_loader, thresholds, device):
     return final_metrics
 
 def main():
-    parser = argparse.ArgumentParser(description='Test ViT model on BigEarthNet dataset')
+    parser = argparse.ArgumentParser(description='Test ViT or CNN model on BigEarthNet dataset')
+    parser.add_argument('--model', type=str, required=True, help='Type of model ViT or CNN')
     parser.add_argument('--checkpoint', type=str, required=True, help='Path to model checkpoint')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size for testing')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for data loading')
     args = parser.parse_args()
 
-    # Set device
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Load checkpoint
     print(f"Loading checkpoint from {args.checkpoint}")
     checkpoint = torch.load(args.checkpoint, map_location=device)
     
-    # Get hyperparameters from checkpoint
-    hp = checkpoint['hyperparameters']
+    # Get model parameters from checkpoint
+    model_params = checkpoint['model_parameters']
     
-    # Create model with same architecture
-    model = ViT(
-        img_width=hp['img_width'],
-        img_channels=hp['img_channels'],
-        patch_size=hp['patch_size'],
-        d_model=hp['embedding_dim'],
-        num_heads=hp['num_heads'],
-        num_layers=hp['num_layers'],
-        num_classes=hp['num_classes'],
-        ff_dim=hp['ff_dim'],
-    ).to(device)
+    # Create model based on saved parameters
+    if args.model == 'vit':
+        model = ViT(
+            img_width=model_params.get('img_width', 120),
+            img_channels=model_params.get('img_channels', 5),
+            patch_size=model_params.get('patch_size', 8),
+            d_model=model_params.get('embedding_dim', 256),
+            num_heads=model_params.get('num_heads', 8),
+            num_layers=model_params.get('num_layers', 6),
+            num_classes=model_params.get('num_classes', 19),
+            ff_dim=model_params.get('ff_dim', 1536),
+        ).to(device)
+    elif args.model == 'cnn' :  # CNN
+        model = CNN(
+            img_channels=model_params.get('img_channels', 5),
+            num_classes=model_params.get('num_classes', 19)
+        ).to(device)
+    else:
+        raise SystemExit("No model available.")
     
-    # Load model weights
     model.load_state_dict(checkpoint['model_state_dict'])
+    # Get thresholds with a default if not found
+    # Get thresholds with a default if not found
+    thresholds = checkpoint.get('thresholds', torch.tensor([0.5] * model_params.get('num_classes', 19)).to(device))
     
-    # Load optimal thresholds
-    thresholds = checkpoint['thresholds']
+    # Print model parameters
+    print("\nModel Parameters:")
+    params = model.get_parameters()
+    print(f"Model Type: {params['model_type']}")
+    print(f"Total Parameters: {params['total_parameters']:,}")
     
-    # Create test dataset and loader
     test_dataset = BigEarthNetDataSet('test')
     test_loader = DataLoader(
         test_dataset,
@@ -126,11 +135,9 @@ def main():
         pin_memory=True
     )
     
-    # Evaluate model
     print("Starting evaluation...")
     metrics = evaluate_model(model, test_loader, thresholds, device)
     
-    # Print results
     print("\nTest Set Metrics:")
     print(f"Precision: {metrics['precision']:.4f}")
     print(f"Recall: {metrics['recall']:.4f}")
