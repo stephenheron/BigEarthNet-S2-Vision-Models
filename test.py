@@ -6,6 +6,7 @@ from vit import ViT
 from cnn import CNN  # Added CNN import
 from torch.utils.data import DataLoader
 import torch.multiprocessing as mp
+from convnext import ConvNeXt  
 
 torch.set_num_threads(mp.cpu_count())
 torch.set_float32_matmul_precision('high')
@@ -80,7 +81,7 @@ def evaluate_model(model, test_loader, thresholds, device):
 
 def main():
     parser = argparse.ArgumentParser(description='Test ViT or CNN model on BigEarthNet dataset')
-    parser.add_argument('--model', type=str, required=True, help='Type of model ViT or CNN')
+    parser.add_argument('--model', type=str, choices=['vit', 'cnn', 'convnext'], required=True)
     parser.add_argument('--checkpoint', type=str, required=True, help='Path to model checkpoint')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size for testing')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for data loading')
@@ -109,6 +110,11 @@ def main():
         ).to(device)
     elif args.model == 'cnn' :  # CNN
         model = CNN(
+            img_channels=model_params.get('img_channels', 5),
+            num_classes=model_params.get('num_classes', 19)
+        ).to(device)
+    elif args.model == 'convnext' :  # CNN
+        model = ConvNeXt(
             img_channels=model_params.get('img_channels', 5),
             num_classes=model_params.get('num_classes', 19)
         ).to(device)

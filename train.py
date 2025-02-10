@@ -4,10 +4,11 @@ from dataset import BigEarthNetDataSet
 from training_framework import ModelTrainer, load_checkpoint
 from vit import ViT  
 from cnn import CNN  
+from convnext import ConvNeXt  
 
 def main():
     parser = argparse.ArgumentParser(description='Train ViT or CNN models on BigEarthNet')
-    parser.add_argument('--model', type=str, choices=['vit', 'cnn'], required=True,
+    parser.add_argument('--model', type=str, choices=['vit', 'cnn', 'convnext'], required=True,
                       help='Model architecture to train (vit or cnn)')
     parser.add_argument('--checkpoint', help='Path to checkpoint file to resume training from', default=None)
     
@@ -77,7 +78,7 @@ def main():
             num_classes=num_classes,
             ff_dim=1536
         ).to(device)
-    else:  # CNN
+    elif args.model == 'cnn':
         num_epochs = 40
         learning_rate = 4e-3
         weight_decay = 2e-4
@@ -86,6 +87,16 @@ def main():
             img_channels=img_channels,
             num_classes=num_classes
         ).to(device)
+    elif args.model == 'convnext':
+        num_epochs = 40
+        learning_rate = 4e-3
+        weight_decay = 2e-4
+
+        model = ConvNeXt(
+            img_channels=img_channels,
+            num_classes=num_classes
+        ).to(device)
+
 
     checkpoint = None
     # Load checkpoint if provided
